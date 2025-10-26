@@ -1,0 +1,101 @@
+user_id,name,role,department,email
+U0001,User 1,Admin,Emergency,user1@example.nhs.uk
+U0002,User 2,Analyst,Data & Analytics,user2@example.nhs.uk
+U0003,User 3,Admin,Emergency,user3@example.nhs.uk
+U0004,User 4,Analyst,Cardiology,user4@example.nhs.uk
+U0005,User 5,Analyst,Digital,user5@example.nhs.uk
+U0006,User 6,Researcher,Population Health,user6@example.nhs.uk
+U0007,User 7,Researcher,Oncology,user7@example.nhs.uk
+U0008,User 8,Researcher,Data & Analytics,user8@example.nhs.uk
+U0009,User 9,Clinician,Digital,user9@example.nhs.uk
+U0010,User 10,Admin,Emergency,user10@example.nhs.uk
+U0011,User 11,Admin,Emergency,user11@example.nhs.uk
+U0012,User 12,Researcher,Digital,user12@example.nhs.uk
+U0013,User 13,Researcher,Data & Analytics,user13@example.nhs.uk
+U0014,User 14,Researcher,Emergency,user14@example.nhs.uk
+U0015,User 15,Analyst,Oncology,user15@example.nhs.uk
+U0016,User 16,Admin,Cardiology,user16@example.nhs.uk
+U0017,User 17,Clinician,Digital,user17@example.nhs.uk
+U0018,User 18,Researcher,Population Health,user18@example.nhs.uk
+U0019,User 19,Researcher,Data & Analytics,user19@example.nhs.uk
+U0020,User 20,Clinician,Digital,user20@example.nhs.uk
+U0021,User 21,Admin,Oncology,user21@example.nhs.uk
+U0022,User 22,Clinician,Emergency,user22@example.nhs.uk
+U0023,User 23,Clinician,Oncology,user23@example.nhs.uk
+U0024,User 24,Researcher,Data & Analytics,user24@example.nhs.uk
+U0025,User 25,Researcher,Digital,user25@example.nhs.uk
+U0026,User 26,Admin,Cardiology,user26@example.nhs.uk
+U0027,User 27,Admin,Cardiology,user27@example.nhs.uk
+U0028,User 28,Analyst,Digital,user28@example.nhs.uk
+U0029,User 29,Researcher,Digital,user29@example.nhs.uk
+U0030,User 30,Admin,Digital,user30@example.nhs.uk
+U0031,User 31,Researcher,Oncology,user31@example.nhs.uk
+U0032,User 32,Clinician,Digital,user32@example.nhs.uk
+U0033,User 33,Researcher,Data & Analytics,user33@example.nhs.uk
+U0034,User 34,Admin,Population Health,user34@example.nhs.uk
+U0035,User 35,Researcher,Data & Analytics,user35@example.nhs.uk
+U0036,User 36,Researcher,Population Health,user36@example.nhs.uk
+U0037,User 37,Analyst,Emergency,user37@example.nhs.uk
+U0038,User 38,Researcher,Emergency,user38@example.nhs.uk
+U0039,User 39,Researcher,Cardiology,user39@example.nhs.uk
+U0040,User 40,Clinician,Population Health,user40@example.nhs.uk
+U0041,User 41,Clinician,Oncology,user41@example.nhs.uk
+U0042,User 42,Analyst,Data & Analytics,user42@example.nhs.uk
+U0043,User 43,Researcher,Emergency,user43@example.nhs.uk
+U0044,User 44,Analyst,Emergency,user44@example.nhs.uk
+U0045,User 45,Clinician,Cardiology,user45@example.nhs.uk
+U0046,User 46,Admin,Emergency,user46@example.nhs.uk
+U0047,User 47,Researcher,Digital,user47@example.nhs.uk
+U0048,User 48,Researcher,Digital,user48@example.nhs.uk
+U0049,User 49,Analyst,Data & Analytics,user49@example.nhs.uk
+U0050,User 50,Researcher,Data & Analytics,user50@example.nhs.uk
+U0051,User 51,Analyst,Emergency,user51@example.nhs.uk
+U0052,User 52,Admin,Digital,user52@example.nhs.uk
+U0053,User 53,Researcher,Cardiology,user53@example.nhs.uk
+U0054,User 54,Clinician,Emergency,user54@example.nhs.uk
+U0055,User 55,Researcher,Oncology,user55@example.nhs.uk
+U0056,User 56,Researcher,Oncology,user56@example.nhs.uk
+U0057,User 57,Clinician,Oncology,user57@example.nhs.uk
+U0058,User 58,Researcher,Digital,user58@example.nhs.uk
+U0059,User 59,Researcher,Cardiology,user59@example.nhs.uk
+U0060,User 60,Analyst,Emergency,user60@example.nhs.uk
+U0061,User 61,Researcher,Cardiology,user61@example.nhs.uk
+U0062,User 62,Clinician,Digital,user62@example.nhs.uk
+U0063,User 63,Researcher,Population Health,user63@example.nhs.uk
+U0064,User 64,Analyst,Cardiology,user64@example.nhs.uk
+U0065,User 65,Clinician,Emergency,user65@example.nhs.uk
+U0066,User 66,Analyst,Data & Analytics,user66@example.nhs.uk
+U0067,User 67,Clinician,Emergency,user67@example.nhs.uk
+U0068,User 68,Clinician,Oncology,user68@example.nhs.uk
+U0069,User 69,Analyst,Data & Analytics,user69@example.nhs.uk
+U0070,User 70,Analyst,Digital,user70@example.nhs.uk
+U0071,User 71,Clinician,Emergency,user71@example.nhs.uk
+U0072,User 72,Analyst,Oncology,user72@example.nhs.uk
+U0073,User 73,Analyst,Oncology,user73@example.nhs.uk
+U0074,User 74,Clinician,Oncology,user74@example.nhs.uk
+U0075,User 75,Analyst,Digital,user75@example.nhs.uk
+U0076,User 76,Clinician,Data & Analytics,user76@example.nhs.uk
+U0077,User 77,Clinician,Oncology,user77@example.nhs.uk
+U0078,User 78,Admin,Oncology,user78@example.nhs.uk
+U0079,User 79,Clinician,Emergency,user79@example.nhs.uk
+U0080,User 80,Researcher,Emergency,user80@example.nhs.uk
+U0081,User 81,Analyst,Data & Analytics,user81@example.nhs.uk
+U0082,User 82,Analyst,Data & Analytics,user82@example.nhs.uk
+U0083,User 83,Researcher,Population Health,user83@example.nhs.uk
+U0084,User 84,Admin,Oncology,user84@example.nhs.uk
+U0085,User 85,Clinician,Cardiology,user85@example.nhs.uk
+U0086,User 86,Researcher,Data & Analytics,user86@example.nhs.uk
+U0087,User 87,Clinician,Cardiology,user87@example.nhs.uk
+U0088,User 88,Researcher,Population Health,user88@example.nhs.uk
+U0089,User 89,Clinician,Oncology,user89@example.nhs.uk
+U0090,User 90,Admin,Population Health,user90@example.nhs.uk
+U0091,User 91,Researcher,Emergency,user91@example.nhs.uk
+U0092,User 92,Analyst,Oncology,user92@example.nhs.uk
+U0093,User 93,Admin,Oncology,user93@example.nhs.uk
+U0094,User 94,Researcher,Oncology,user94@example.nhs.uk
+U0095,User 95,Analyst,Cardiology,user95@example.nhs.uk
+U0096,User 96,Admin,Digital,user96@example.nhs.uk
+U0097,User 97,Admin,Digital,user97@example.nhs.uk
+U0098,User 98,Analyst,Digital,user98@example.nhs.uk
+U0099,User 99,Analyst,Population Health,user99@example.nhs.uk
+U0100,User 100,Admin,Cardiology,user100@example.nhs.uk
