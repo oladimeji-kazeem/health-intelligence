@@ -1,816 +1,831 @@
-import streamlit as st
-import streamlit.components.v1 as components
-import shap
-import pandas as pd
-import numpy as np
-import os
+# ===============================================================
+# 🏥 AI-Ready Health Data Platform — Streamlit App (All-in-One)
+# ===============================================================
+
+import os, json, joblib, hashlib
 from datetime import datetime, timedelta
-import hashlib
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
-from imblearn.over_sampling import SMOTE
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
-import seaborn as sns
 
-
-# Define relative paths for data loading
-DATA_DIR = "data"
-DATA_LAKE_DIR = "data_lake"
-# Assuming the user runs the app from the root of the project structure.
-
-# Helper function to find a file, checking both current directory and a subdirectory
-def find_file(relative_path):
-    if os.path.exists(relative_path):
-        return relative_path
-    # This assumes a flat data/ or data_lake/ folder structure in the same dir as app.py
-    # For the purposes of this task, we assume the data has been correctly placed.
-    return relative_path
-
-
-# Load datasets (assuming they are in the specified relative paths)
-# We use find_file to ensure correct relative path usage
+# Optional YAML pretty print (fallback to JSON if missing)
 try:
-    patients = pd.read_csv(find_file(os.path.join(DATA_DIR, "patients.csv")))
-    encounters = pd.read_csv(find_file(os.path.join(DATA_DIR, "encounters.csv")))
-    conditions = pd.read_csv(find_file(os.path.join(DATA_DIR, "conditions.csv")))
-    observations = pd.read_csv(find_file(os.path.join(DATA_DIR, "observations.csv")))
-    meds = pd.read_csv(find_file(os.path.join(DATA_DIR, "medication_requests.csv")))
-    outcomes = pd.read_csv(find_file(os.path.join(DATA_DIR, "outcomes.csv")))
-    consent = pd.read_csv(find_file(os.path.join(DATA_DIR, "consent.csv")))
-    users = pd.read_csv(find_file(os.path.join(DATA_DIR, "users.csv")))
-    # For audit_log, check both the governance folder (from initial app.py) and data folder (from notebook)
-    if os.path.exists(find_file(os.path.join(DATA_DIR, "audit_log.csv"))):
-         audit_log = pd.read_csv(find_file(os.path.join(DATA_DIR, "audit_log.csv")))
-    elif os.path.exists(find_file(os.path.join("governance", "audit_log.csv"))):
-         audit_log = pd.read_csv(find_file(os.path.join("governance", "audit_log.csv")))
-    else:
-         # If not found, create an empty one for logging
-         audit_log = pd.DataFrame(columns=["log_id", "user_id", "action", "resource", "timestamp", "purpose_of_use", "result"])
+    import yaml
+    HAS_YAML = True
+except Exception:
+    HAS_YAML = False
+
+# ML
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier
+
+import shap  # TreeExplainer for RandomForest
+
+# FIX 1: Import imblearn for SMOTE
+# NOTE: User must ensure 'imbalanced-learn' is installed
+try:
+    from imblearn.over_sampling import SMOTE
+except ImportError:
+    SMOTE = None 
+    st.error("Missing dependency: 'imblearn'. Please run: pip install imbalanced-learn")
+    st.stop()
 
 
-    # Load FHIR-like datasets from the data lake structure
-    fhir_patients = pd.read_csv(find_file(os.path.join(DATA_LAKE_DIR, "patients", "fhir_patients.csv")))
-    fhir_encounters = pd.read_csv(find_file(os.path.join(DATA_LAKE_DIR, "encounters", "fhir_encounters.csv")))
-    fhir_conditions = pd.read_csv(find_file(os.path.join(DATA_LAKE_DIR, "conditions", "fhir_conditions.csv")))
-    fhir_observations = pd.read_csv(find_file(os.path.join(DATA_LAKE_DIR, "observations", "fhir_observations.csv")))
-    fhir_meds = pd.read_csv(find_file(os.path.join(DATA_LAKE_DIR, "medication_requests", "fhir_medication_requests.csv")))
+# -------------------------------
+# App Config
+# -------------------------------
+st.set_page_config(page_title="AI-Ready Health Data Platform", page_icon="🏥", layout="wide")
+st.title("🏥 AI-Ready Health Data Platform")
+st.caption("Interoperability • Secure Data Access • Predictive Analytics • Explainability • Consent")
 
-except FileNotFoundError as e:
-    st.error(f"Error loading data files: {e}. Please ensure the data generation and ingestion steps were completed and that the 'data' and 'data_lake' directories with the necessary CSVs are correctly placed.")
-    st.stop() # Stop the app if data loading fails
+DATA_DIR = "data"
+MODELS_DIR = "models"
+GOV_DIR = "governance"
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(GOV_DIR, exist_ok=True)
 
+READM_MODEL_PATH = os.path.join(MODELS_DIR, "readmission_risk_pipeline.joblib")
+COND_MODEL_PATH = os.path.join(MODELS_DIR, "patient_condition.pkl")
+AUDIT_PATH = os.path.join(GOV_DIR, "audit_log.csv")
+CONSENT_PATH = os.path.join(DATA_DIR, "consent.csv")
 
-# Define the datasets dictionary at the top level so it's accessible everywhere
-datasets = {
-    "patients.csv": patients,
-    "encounters.csv": encounters,
-    "conditions.csv": conditions,
-    "observations.csv": observations,
-    "medication_requests.csv": meds,
-    "outcomes.csv": outcomes,
-    "consent.csv": consent,
-    "users.csv": users,
-    "audit_log.csv": audit_log
+# -------------------------------
+# RBAC demo roles (Defined early for use in load_all)
+# -------------------------------
+ROLES = {
+    "Admin": {"can_read":["*"], "can_score": True},
+    "Analyst": {"can_read":["Patient","Encounter","Outcome", "Consent"], "can_score": True}, 
+    "Clinician": {"can_read":["Patient","Encounter","Outcome"], "can_score": True},
+    "Researcher": {"can_read":["Encounter","Outcome"], "can_score": False}
 }
+def can_read(role, resource):
+    rules = ROLES.get(role, {})
+    allowed = rules.get("can_read",[])
+    return "*" in allowed or resource in allowed
+
+def can_score(role):
+    return ROLES.get(role,{}).get("can_score",False)
 
 
-# Assume common_conditions list is available
-common_conditions = ["I10", "E11", "I50", "J45", "J44", "N18", "C34", "C50", "F32", "E78"]
-
-# --- Data Preparation for Models (using global dataframes) ---
-
-# Readmission Model Data Prep
-@st.cache_data
-def prepare_readmission_data(fhir_encounters, fhir_patients, fhir_conditions):
-    readmission_data = pd.merge(fhir_encounters, fhir_patients[["id", "gender", "extension.ethnicity", "extension.age_years", "extension.imd_quintile"]],
-                                left_on="subject.reference", right_on="id", how="left", suffixes=('', '_patient'))
-    readmission_data = readmission_data.drop(columns=["id_patient"])
-
-    condition_list_per_encounter = fhir_conditions.groupby("encounter.reference")["code.coding.code"].agg(list).reset_index()
-    condition_list_per_encounter.rename(columns={"encounter.reference": "encounter_id", "code.coding.code": "condition_codes"}, inplace=True)
-    condition_list_per_encounter["encounter_id"] = condition_list_per_encounter["encounter_id"].str.replace("Encounter/", "")
-
-    readmission_data = pd.merge(readmission_data, condition_list_per_encounter, left_on="id", right_on="encounter_id", how="left")
-    readmission_data = readmission_data.drop(columns=["encounter_id"])
-
-    # Simplify condition features: presence of common conditions
-    common_conditions = ["I10", "E11", "I50", "J45", "J44", "N18", "C34", "C50", "F32", "E78"]
-    for cond in common_conditions:
-        readmission_data[f"has_condition_{cond}"] = readmission_data["condition_codes"].apply(lambda x: 1 if isinstance(x, list) and cond in x else 0)
-    readmission_data = readmission_data.drop(columns=["condition_codes"])
-
-    potential_feature_cols_readmission = [col for col in readmission_data.columns if col not in ["id", "patient_id", "subject.reference", "encounter.reference", "period.start", "period.end", "extension.readmission_30d", "extension.mortality_90d"]]
-    
-    numerical_cols_readmission = readmission_data[potential_feature_cols_readmission].select_dtypes(include=np.number).columns.tolist()
-    categorical_cols_readmission = readmission_data[potential_feature_cols_readmission].select_dtypes(include='object').columns.tolist()
-
-    for col in categorical_cols_readmission:
-        readmission_data[col] = readmission_data[col].fillna('Missing')
-
-    readmission_data = pd.get_dummies(readmission_data, columns=categorical_cols_readmission, dummy_na=False, drop_first=True)
-
-    final_feature_cols_readmission = [col for col in readmission_data.columns if col not in ["id", "patient_id", "subject.reference", "encounter.reference", "period.start", "period.end", "extension.readmission_30d", "extension.mortality_90d", "extension.age_years", "extension.imd_quintile"]]
-    
-    X_readmission = readmission_data[final_feature_cols_readmission].copy()
-    y_readmission = readmission_data["extension.readmission_30d"]
-
-    for col in X_readmission.select_dtypes(include=np.number).columns:
-        if X_readmission[col].isnull().any():
-            median_val = X_readmission[col].median()
-            X_readmission[col] = X_readmission[col].fillna(median_val)
-            
-    return X_readmission, y_readmission
-
-X_readmission, y_readmission = prepare_readmission_data(fhir_encounters, fhir_patients, fhir_conditions)
-
-# Chronic Disease Model Data Prep
-@st.cache_data
-def prepare_chronic_disease_data(fhir_conditions, fhir_patients, observations, meds):
-    patients_with_diabetes = fhir_conditions[fhir_conditions["code.coding.code"] == "E11"]["subject.reference"].unique()
-    patient_ids_all = fhir_patients["id"].unique()
-    diabetes_target = pd.DataFrame({
-        "id": patient_ids_all,
-        "has_diabetes_E11": [1 if "Patient/"+patient_id in patients_with_diabetes else 0 for patient_id in patient_ids_all]
-    })
-    chronic_disease_data = pd.merge(fhir_patients[["id", "gender", "extension.ethnicity", "extension.age_years", "extension.imd_quintile"]],
-                                    diabetes_target, on="id", how="left")
-    latest_observations = observations.sort_values(by="taken_dt").drop_duplicates(subset=["patient_id", "code"], keep="last")
-    obs_pivot = latest_observations.pivot(index="patient_id", columns="code", values="value_num").reset_index()
-    chronic_disease_data = pd.merge(chronic_disease_data, obs_pivot, left_on="id", right_on="patient_id", how="left")
-    chronic_disease_data = chronic_disease_data.drop(columns=["patient_id"])
-    meds_relevant = meds[meds["drug_code"].isin(["MET", "INS"])].copy()
-    meds_presence = meds_relevant.groupby("patient_id")["drug_code"].agg(lambda x: list(set(x))).reset_index()
-    meds_presence.rename(columns={"drug_code": "medication_codes"}, inplace=True)
-    for drug in ["MET", "INS"]:
-        meds_presence[f"has_medication_{drug}"] = meds_presence["medication_codes"].apply(lambda x: 1 if isinstance(x, list) and drug in x else 0)
-    meds_presence = meds_presence.drop(columns=["medication_codes"])
-    chronic_disease_data = pd.merge(chronic_disease_data, meds_presence, left_on="id", right_on="patient_id", how="left")
-    chronic_disease_data = chronic_disease_data.drop(columns=["patient_id"])
-    conditions_relevant_chronic = fhir_conditions[fhir_conditions["code.coding.code"].isin(["E78", "I10"])].copy()
-    conditions_relevant_chronic["patient_id"] = conditions_relevant_chronic["subject.reference"].str.replace("Patient/", "")
-    conditions_presence_chronic = conditions_relevant_chronic.groupby("patient_id")["code.coding.code"].agg(lambda x: list(set(x))).reset_index()
-    conditions_presence_chronic.rename(columns={"code.coding.code": "related_condition_codes"}, inplace=True)
-    for cond in ["E78", "I10"]:
-        conditions_presence_chronic[f"has_related_condition_{cond}"] = conditions_presence_chronic["related_condition_codes"].apply(lambda x: 1 if isinstance(x, list) and cond in x else 0)
-    conditions_presence_chronic = conditions_presence_chronic.drop(columns=["related_condition_codes"])
-    chronic_disease_data = pd.merge(chronic_disease_data, conditions_presence_chronic, left_on="id", right_on="patient_id", how="left")
-    chronic_disease_data = chronic_disease_data.drop(columns=["patient_id"])
-
-    numerical_cols_chronic = chronic_disease_data.select_dtypes(include=np.number).columns.tolist()
-    numerical_cols_to_impute_chronic = [col for col in numerical_cols_chronic if col != "has_diabetes_E11"]
-    for col in numerical_cols_to_impute_chronic:
-        if chronic_disease_data[col].isnull().any():
-            median_val = chronic_disease_data[col].median()
-            chronic_disease_data[col] = chronic_disease_data[col].fillna(median_val)
-
-    categorical_cols_chronic = chronic_disease_data.select_dtypes(include='object').columns.tolist()
-    categorical_cols_to_impute_chronic = [col for col in categorical_cols_chronic if col != "id"]
-    for col in categorical_cols_to_impute_chronic:
-         chronic_disease_data[col] = chronic_disease_data[col].fillna('Missing')
-
-    chronic_disease_data = pd.get_dummies(chronic_disease_data, columns=categorical_cols_to_impute_chronic, dummy_na=False, drop_first=True)
-    chronic_disease_features = [col for col in chronic_disease_data.columns if col not in ["id", "has_diabetes_E11"]]
-    chronic_disease_target = "has_diabetes_E11"
-    X_chronic = chronic_disease_data[chronic_disease_features]
-    y_chronic = chronic_disease_data[chronic_disease_target]
-    
-    return X_chronic, y_chronic
-
-X_chronic, y_chronic = prepare_chronic_disease_data(fhir_conditions, fhir_patients, observations, meds)
-
-
-# --- Model Training (cached to avoid re-training on each interaction) ---
-
-@st.cache_resource
-def train_readmission_model(X, y):
-    X_train, _, y_train, _ = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    smote = SMOTE(random_state=42)
-    X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
-    model = HistGradientBoostingClassifier(random_state=42)
-    model.fit(X_train_resampled, y_train_resampled)
-    return model
-
-@st.cache_resource
-def train_chronic_model(X, y):
-    X_train, _, y_train, _ = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    smote = SMOTE(random_state=42)
-    X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
-    model = HistGradientBoostingClassifier(random_state=42)
-    model.fit(X_train_resampled, y_train_resampled)
-    return model
-
-model_readmission = train_readmission_model(X_readmission, y_readmission)
-model_chronic = train_chronic_model(X_chronic, y_chronic)
-
-# --- Secure Access Functions (now referencing global/cached dataframes) ---
-
-def check_permission(user_id, resource):
-    """Simulates checking user permissions based on role and resource."""
-    user_info = users[users["user_id"] == user_id]
-    if user_info.empty:
-        return False # User not found
-    user_role = user_info["role"].iloc[0]
-
-    # Define access rules
-    if user_role == "Admin":
-        return True
-    elif user_role == "Analyst":
-        return resource in ["patients", "encounters", "conditions", "observations", "medication_requests", "outcomes", "users"]
-    elif user_role == "Clinician":
-        return resource in ["patients", "encounters", "conditions", "observations", "medication_requests", "outcomes"]
-    elif user_role == "Researcher":
-        return resource in ["patients", "encounters", "conditions", "observations", "medication_requests", "outcomes"]
-    else:
-        return False
-
-# Global audit_log DataFrame (loaded or initialized empty)
-# Since audit_log is already defined globally by the initial load attempt, we just ensure the function uses it.
-
-def log_access(user_id, action, resource, purpose_of_use, result):
-    """Logs data access attempts."""
-    global audit_log
-    log_entry = {
-        # Using simple string interpolation for log_id now that we are outside the multiline f-string generation
-        "log_id": f"L{str(len(audit_log) + 1).zfill(7)}",
+# -------------------------------
+# Utilities
+# -------------------------------
+def write_audit(user_id, action, resource, record_id, purpose, result="success"):
+    row = {
+        "log_id": f"L{int(datetime.utcnow().timestamp()*1000)}",
         "user_id": user_id,
         "action": action,
         "resource": resource,
-        "timestamp": datetime.now().isoformat(sep=" "),
-        "purpose_of_use": purpose_of_use,
+        "record_id": record_id,
+        "timestamp": datetime.utcnow().isoformat(sep=" "),
+        "purpose_of_use": purpose,
         "result": result
     }
-    # Using pd.concat to append a new row
-    if audit_log.empty:
-        audit_log = pd.DataFrame([log_entry])
+    df = pd.DataFrame([row])
+    header = not os.path.exists(AUDIT_PATH)
+    df.to_csv(AUDIT_PATH, mode="a", header=header, index=False)
+
+def hash_str(s):
+    import hashlib as _h
+    return _h.sha256(s.encode("utf-8")).hexdigest()[:32]
+
+@st.cache_data(show_spinner=False)
+def generate_synthetic_core():
+    """Create minimal synthetic datasets if not found, and persist to /data."""
+    np.random.seed(42)
+
+    # Patients
+    n_pat = 2000
+    ages = np.clip(np.random.normal(56, 18, n_pat).astype(int), 0, 95)
+    pids = [f"P{str(i).zfill(6)}" for i in range(1, n_pat + 1)]
+    patients = pd.DataFrame({
+        "patient_id": pids,
+        "nhs_number_hash": [hash_str(f"NHS-{pid}") for pid in pids],
+        "birth_date": [(datetime(2025, 1, 1) - timedelta(days=int(a * 365.25))).date().isoformat() for a in ages],
+        "sex": np.random.choice(["Male", "Female"], size=n_pat),
+        "ethnicity": np.random.choice(["White", "Black", "Asian", "Mixed", "Other"], size=n_pat, p=[0.75, 0.07, 0.12, 0.04, 0.02]),
+        "postcode_lsoa": [f"E010{np.random.randint(1000000, 9999999)}" for _ in range(n_pat)],
+        "imd_quintile": np.random.choice([1,2,3,4,5], size=n_pat, p=[0.25,0.25,0.2,0.2,0.1]),
+        "age_years": ages,
+        "bmi": np.round(np.random.normal(28, 6, n_pat), 1),
+        "smoker": np.random.choice(["Yes", "No"], size=n_pat, p=[0.28, 0.72]),
+        "exercise_freq": np.random.choice(["Low", "Moderate", "High"], size=n_pat, p=[0.4, 0.4, 0.2])
+    })
+
+    # Add vitals/biomarkers used by condition model
+    patients["systolic_bp"] = np.random.randint(100, 180, n_pat)
+    patients["diastolic_bp"] = np.random.randint(60, 110, n_pat)
+    patients["glucose_mmol"] = np.round(np.random.uniform(3.5, 12.0, n_pat), 1)
+    patients["cholesterol_mmol"] = np.round(np.random.uniform(3.0, 8.5, n_pat), 1)
+
+    def assign_condition(row):
+        if row["glucose_mmol"] > 8.5:
+            return "Diabetes"
+        elif row["systolic_bp"] > 140 or row["diastolic_bp"] > 90:
+            return "Hypertension"
+        elif row["cholesterol_mmol"] > 6.8 and row["bmi"] > 30:
+            return "Heart Disease"
+        elif row["bmi"] > 32:
+            return "Obesity"
+        else:
+            return "Healthy"
+
+    patients["condition"] = patients.apply(assign_condition, axis=1)
+
+    # Encounters
+    n_enc = 10000
+    eids = [f"E{str(i).zfill(7)}" for i in range(1, n_enc + 1)]
+    types = np.random.choice(["inpatient", "outpatient", "emergency", "virtual"], size=n_enc, p=[0.28, 0.45, 0.22, 0.05])
+    start = np.array([datetime(2020, 1, 1) + timedelta(days=int(np.random.uniform(0, 2100))) for _ in range(n_enc)])
+    los = np.zeros(n_enc, dtype=int)
+    los[types == "inpatient"] = np.maximum(1, np.random.lognormal(1.3, 0.6, (types == "inpatient").sum()).astype(int))
+    los[types == "emergency"] = np.random.choice([0, 1, 2], size=(types == "emergency").sum(), p=[0.6, 0.3, 0.1])
+    end = start + np.array([timedelta(days=int(d), hours=np.random.randint(0, 12)) for d in los])
+
+    encounters = pd.DataFrame({
+        "encounter_id": eids,
+        "patient_id": np.random.choice(pids, size=n_enc),
+        "start_dt": [d.isoformat(sep=" ") for d in start],
+        "end_dt": [d.isoformat(sep=" ") for d in end],
+        "type": types,
+        "los_days": los
+    })
+
+    # Outcomes (readmission & mortality; los copied for convenience)
+    enc_df = encounters.merge(patients[["patient_id", "age_years"]], on="patient_id", how="left")
+    sev = (enc_df["los_days"] > 3).astype(int) + (enc_df["type"] == "inpatient").astype(int)
+    logits = -1.7 + 0.15 * sev + 0.01 * (enc_df["age_years"] - 55) + 0.12 * (enc_df["los_days"] > 5)
+    proba = 1 / (1 + np.exp(-logits))
+    outcomes = pd.DataFrame({
+        "encounter_id": enc_df["encounter_id"],
+        "readmission_30d": (np.random.rand(len(proba)) < proba * 0.9).astype(int),
+        "mortality_90d": (np.random.rand(len(proba)) < proba * 0.2).astype(int),
+        "los_days": enc_df["los_days"].fillna(0).astype(int)
+    })
+
+    # Consent
+    if not os.path.exists(CONSENT_PATH):
+        consent = pd.DataFrame({
+            "patient_id": pids,
+            "allow_research": np.random.choice([0,1], size=n_pat, p=[0.06, 0.94]),
+            "allow_risk_scoring": np.random.choice([0,1], size=n_pat, p=[0.2, 0.8]),
+            "last_updated": [(datetime(2022, 1, 1) + timedelta(days=int(np.random.uniform(0, 900)))).date().isoformat() for _ in range(n_pat)]
+        })
+        consent.to_csv(CONSENT_PATH, index=False)
     else:
-        audit_log = pd.concat([audit_log, pd.DataFrame([log_entry])], ignore_index=True)
+        consent = pd.read_csv(CONSENT_PATH)
+
+    # Persist
+    patients.to_csv(os.path.join(DATA_DIR, "patients.csv"), index=False)
+    encounters.to_csv(os.path.join(DATA_DIR, "encounters.csv"), index=False)
+    outcomes.to_csv(os.path.join(DATA_DIR, "outcomes.csv"), index=False)
+    if not os.path.exists(AUDIT_PATH):
+        pd.DataFrame(columns=["log_id","user_id","action","resource","record_id","timestamp","purpose_of_use","result"]).to_csv(AUDIT_PATH, index=False)
+    if not os.path.exists(os.path.join(DATA_DIR, "audit_log.csv")): 
+        pd.DataFrame(columns=["log_id","user_id","action","resource","record_id","timestamp","purpose_of_use","result"]).to_csv(os.path.join(DATA_DIR, "audit_log.csv"), index=False)
+
+    return patients, encounters, outcomes, consent
+
+@st.cache_resource(show_spinner=False)
+def ensure_condition_model(patients_df: pd.DataFrame):
+    """Load patient_condition.pkl or train a quick RandomForest pipeline and save."""
+    if os.path.exists(COND_MODEL_PATH):
+        return joblib.load(COND_MODEL_PATH)
+
+    feats_num = ["age_years","bmi","imd_quintile","systolic_bp","diastolic_bp","glucose_mmol","cholesterol_mmol"]
+    feats_cat = ["sex","ethnicity","smoker","exercise_freq"]
+    X = patients_df[feats_num + feats_cat]
+    y = patients_df["condition"]
+
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
+
+    pre = ColumnTransformer([
+        ("num", StandardScaler(), feats_num),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), feats_cat)
+    ])
+    rf = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=42, class_weight="balanced")
+    pipe = Pipeline([("preprocessor", pre), ("model", rf)])
+    pipe.fit(Xtr, ytr)
+    joblib.dump(pipe, COND_MODEL_PATH)
+    return pipe
+
+@st.cache_resource(show_spinner=False)
+def ensure_readmission_model(patients, encounters, outcomes):
+    """Train (or load) a simple readmission risk model safely."""
+    if os.path.exists(READM_MODEL_PATH):
+        return joblib.load(READM_MODEL_PATH)
+
+    # --- merge data ---
+    df = encounters.merge(patients[["patient_id", "age_years", "sex", "ethnicity"]], on="patient_id", how="left")
+    df = df.merge(outcomes[["encounter_id", "readmission_30d", "los_days"]], on="encounter_id", how="left")
+
+    # --- handle missing or missing columns ---
+    if "los_days" not in df.columns:
+        st.warning("⚠️ 'los_days' column missing — creating synthetic length of stay.")
+        df["los_days"] = np.random.randint(1, 10, size=len(df))
+    else:
+        mask = df["los_days"].isna()
+        if mask.any():
+            df.loc[mask, "los_days"] = np.random.randint(1, 10, size=mask.sum())
+    
+    df["los_days"] = df["los_days"].fillna(df["los_days"].median())
+    df["is_inpatient"] = (df["type"] == "inpatient").astype(int)
+    df["is_emergency"] = (df["type"] == "emergency").astype(int)
+    df["log_los"] = np.log1p(df["los_days"])
+
+    # --- define features ---
+    features = [
+        "age_years", "sex", "ethnicity",
+        "is_inpatient", "is_emergency", "log_los"
+    ]
+    target = "readmission_30d"
+
+    df = df.dropna(subset=[target, "age_years"])
+    X, y = df[features], df[target]
+
+    # --- preprocess ---
+    num_features = ["age_years", "log_los"]
+    cat_features = ["sex", "ethnicity", "is_inpatient", "is_emergency"]
+
+    num_transformer = Pipeline([("scaler", StandardScaler())])
+    cat_transformer = OneHotEncoder(handle_unknown="ignore")
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", num_transformer, num_features),
+            ("cat", cat_transformer, cat_features)
+        ],
+        remainder='passthrough'
+    )
+
+    # --- model pipeline ---
+    model = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("classifier", LogisticRegression(max_iter=200, class_weight="balanced", random_state=42))
+        ]
+    )
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+    model.fit(X_train, y_train)
+    y_pred_proba = model.predict_proba(X_test)[:, 1]
+    auc = roc_auc_score(y_test, y_pred_proba)
+
+    st.success(f"✅ Readmission model trained successfully (AUC = {auc:.3f})")
+
+    # --- save model for reuse ---
+    joblib.dump(model, READM_MODEL_PATH)
+
+    return model
+
+@st.cache_data(show_spinner=False)
+def load_all():
+    # Load users first as it's needed for RBAC roles immediately
+    if os.path.exists(os.path.join(DATA_DIR, "users.csv")):
+         users_df = pd.read_csv(os.path.join(DATA_DIR, "users.csv"))
+    else:
+         # Create a basic users file if not found
+         users_df = pd.DataFrame({"user_id": [f"U{str(i).zfill(4)}" for i in range(1, 101)], "role": np.random.choice(list(ROLES.keys()), size=100)})
+         users_df.to_csv(os.path.join(DATA_DIR, "users.csv"), index=False)
+
+    # Load/Generate core data
+    patients, encounters, outcomes, consent = generate_synthetic_core()
+
+    # Load audit log (should be in GOV_DIR or DATA_DIR)
+    if os.path.exists(AUDIT_PATH):
+        audit_log = pd.read_csv(AUDIT_PATH)
+    else:
+        audit_log = pd.DataFrame(columns=["log_id","user_id","action","resource","record_id","timestamp","purpose_of_use","result"])
+    
+    return patients, encounters, outcomes, consent, users_df, audit_log
 
 
-def retrieve_data(user_id, resource, patient_id=None, purpose_of_use="unknown", allow_research=None):
-    """Simulates data retrieval based on user permissions and optional filtering, with logging and consent check."""
-    action = "READ"
-    user_info = users[users["user_id"] == user_id]
-    if user_info.empty:
-        log_access(user_id, action, resource, purpose_of_use, "denied - user not found")
-        return f"Access Denied: User {user_id} not found."
-    user_role = user_info["role"].iloc[0]
+# -------------------------------
+# Call functions AFTER they are defined (re-ordered execution block)
+# -------------------------------
+patients, encounters, outcomes, consent, users, audit_log = load_all()
+cond_model = ensure_condition_model(patients)
+readm_model = ensure_readmission_model(patients, encounters, outcomes)
 
-    # Enforce consent for Researchers accessing patient-specific data
-    if user_role == "Researcher" and patient_id:
-        if allow_research is None:
-             log_access(user_id, action, resource, purpose_of_use, "denied - consent unknown")
-             return f"Access Denied: Consent status unknown for patient {patient_id}. Access denied."
-        elif allow_research == 0:
-            log_access(user_id, action, resource, purpose_of_use, "denied - no research consent")
-            return f"Access Denied: Patient {patient_id} has not consented to research."
 
-    has_permission = check_permission(user_id, resource)
-    if not has_permission:
-        log_access(user_id, action, resource, purpose_of_use, "denied")
-        return f"Access Denied: User {user_id} does not have permission to access {resource}."
+# -------------------------------
+# Sidebar: Role & Purpose
+# -------------------------------
+st.sidebar.header("🔐 Access Identity")
+user_ids_for_roles = {r: users[users['role'] == r]['user_id'].iloc[0] for r in ROLES.keys() if not users[users['role'] == r].empty}
+default_role = 'Analyst'
+role = st.sidebar.selectbox("Role", list(ROLES.keys()), index=list(ROLES.keys()).index(default_role))
+user_id = st.sidebar.text_input("User ID", value=user_ids_for_roles.get(role, "U0001"))
+purpose = st.sidebar.selectbox("Purpose of use", ["care","research","population_health","governance"])
 
-    # Load the data for the resource
-    try:
-        if resource in datasets:
-            df = datasets[resource].copy()
-        else:
-             df_name = f"fhir_{resource}.csv"
-             file_path_lake = os.path.join(DATA_LAKE_DIR, resource, df_name)
-             df = pd.read_csv(file_path_lake).copy()
+# -------------------------------
+# Navigation
+# -------------------------------
+page = st.sidebar.radio("📑 Pages", [
+    "Historical Dashboard",
+    "Interoperability (FHIR-like)",
+    "Secure Access & Audit Trail",
+    "Predictive Analytics",
+    "Governance: Explainability & Consent"
+])
+
+# ===============================================================
+# 1) Historical Dashboard (UPDATED SECTION)
+# ===============================================================
+if page == "Historical Dashboard":
+    st.subheader("📈 Historical Dashboard")
+
+    enc = encounters.copy()
+    enc["start_dt"] = pd.to_datetime(enc["start_dt"])
+    enc["month"] = enc["start_dt"].dt.to_period("M").astype(str)
+    
+    # Calculate new metrics
+    avg_los = outcomes['los_days'].mean()
+    avg_age = patients['age_years'].mean()
+    
+    # --- Metrics ---
+    col1, c2, c3, c4, c5 = st.columns(5)
+    col1.metric("Patients", patients["patient_id"].nunique())
+    c2.metric("Encounters", enc["encounter_id"].nunique())
+    c3.metric("Readmission Rate", f"{outcomes['readmission_30d'].mean()*100:.1f}%")
+    c4.metric("Avg. LOS (Days)", f"{avg_los:.1f}")
+    c5.metric("Avg. Patient Age", f"{avg_age:.1f}")
+
+    # --- New Charts: Clinical Analysis ---
+    st.markdown("### Clinical Analysis")
+    cols_los = st.columns(2)
+    
+    # Chart 4: LOS Distribution by Encounter Type
+    with cols_los[0]:
+        los_data = enc.merge(outcomes[['encounter_id', 'los_days']], on='encounter_id', how='left')
+        st.plotly_chart(px.box(los_data, x="type", y="los_days_y", color="type", 
+                            title="Length of Stay Distribution by Encounter Type", labels={"los_days_y": "Length of Stay (Days)"}), use_container_width=True)
+
+    # Chart 5: Condition Prevalence by Ethnicity
+    with cols_los[1]:
+        ethnicity_cond = patients.groupby(["ethnicity", "condition"]).size().reset_index(name='count')
+        total_by_eth = patients.groupby("ethnicity").size().reset_index(name='total')
+        ethnicity_cond = ethnicity_cond.merge(total_by_eth, on="ethnicity")
+        ethnicity_cond['prevalence'] = ethnicity_cond['count'] / ethnicity_cond['total'] * 100
         
-        log_access(user_id, action, resource, purpose_of_use, "success")
-    except FileNotFoundError:
-        log_access(user_id, action, resource, purpose_of_use, "error")
-        return f"Error: Resource '{resource}' not found."
-    except Exception as e:
-        log_access(user_id, action, resource, purpose_of_use, "error")
-        return f"An error occurred: {e}"
+        st.plotly_chart(px.bar(ethnicity_cond.sort_values('prevalence', ascending=False), 
+                            x="ethnicity", y="prevalence", color="condition",
+                            title="Condition Prevalence by Ethnicity (%)"), use_container_width=True)
 
 
-    # Implement filtering/anonymization
-    if user_role == "Clinician" and patient_id:
-        if resource == "patients":
-            return df[df["id"] == patient_id]
-        elif resource in ["encounters", "conditions", "observations", "medication_requests", "outcomes"]:
-             return df[df["subject.reference"] == f"Patient/{patient_id}"]
-        else:
-             return "Filtering by patient ID is not supported for this resource."
+    # --- Original Charts: Encounter and Outcome Trends ---
+    st.markdown("### Encounter and Outcome Trends")
+    
+    # Chart 1: Monthly Encounters by Type
+    vol = enc.groupby(["month","type"])["encounter_id"].count().reset_index(name="count")
+    st.plotly_chart(px.line(vol, x="month", y="count", color="type", title="Monthly Encounters by Type"), use_container_width=True)
 
-    elif user_role == "Researcher" and resource in ["patients", "encounters", "conditions", "observations", "medication_requests", "outcomes"]:
-        # Filter by consent (which was checked above)
-        allowed_patients = consent[consent["allow_research"] == 1]["patient_id"].unique()
-        if resource == "patients":
-             # Researcher gets anonymized patient data if accessing the full list
-             anonymized_df = df[df["id"].isin(allowed_patients)].drop(columns=["nhs_number_hash"], errors="ignore")
-             return anonymized_df
-        else:
-             return df[df["subject.reference"].isin([f"Patient/{pid}" for pid in allowed_patients])]
+    # Chart 2: Monthly Outcome Rates Trend
+    out_join = encounters[["encounter_id","start_dt"]].merge(outcomes, on="encounter_id")
+    out_join["start_dt"] = pd.to_datetime(out_join["start_dt"])
+    out_join["month"] = out_join["start_dt"].dt.to_period("M").astype(str)
+    trend = out_join.groupby("month")[["readmission_30d","mortality_90d"]].mean().mul(100).reset_index()
+    trend = trend.melt(id_vars=["month"], var_name="metric", value_name="rate_pct")
+    st.plotly_chart(px.bar(trend, x="month", y="rate_pct", color="metric", barmode="group",
+                           title="Monthly Outcome Rates (%)"), use_container_width=True)
 
-    elif user_role == "Analyst" and resource == "patients":
-         # Simulate anonymization for Analyst (e.g., drop NHS number hash)
-         return df.drop(columns=["nhs_number_hash"], errors="ignore")
+    # Chart 3: Conditions by Age
+    pats = patients.copy()
+    pats["age_band"] = pd.cut(pats["age_years"], bins=[0,30,45,60,75,100], labels=["≤30","31–45","46–60","61–75","76+"])
+    st.plotly_chart(px.histogram(pats, x="age_band", color="condition", barmode="group",
+                                 title="Conditions by Age Band"), use_container_width=True)
 
-    return df
+# ===============================================================
+# 2) Interoperability (FHIR-like schema)
+# ===============================================================
+elif page == "Interoperability (FHIR-like)":
+    st.subheader("🔗 Interoperability — FHIR-like schema")
+    st.markdown("In a real Data Platform, raw EHR data would be transformed into canonical models like FHIR to ensure interoperability and a standardized view of patient data.")
+    st.markdown("Here is a conceptual FHIR-like schema and data sampling from the **raw data** in the `data` folder.")
+    
+    schema = {
+        "Patient":{"pk":"patient_id","columns":["patient_id","nhs_number_hash","birth_date","sex","ethnicity","postcode_lsoa","imd_quintile","age_years","bmi","smoker","exercise_freq","systolic_bp","diastolic_bp","glucose_mmol","cholesterol_mmol","condition"]},
+        "Encounter":{"pk":"encounter_id","fk":[{"patient_id":"Patient.patient_id"}],
+                     "columns":["encounter_id","patient_id","start_dt","end_dt","type","los_days"]},
+        "Outcome":{"pk":"encounter_id","fk":[{"encounter_id":"Encounter.encounter_id"}],
+                   "columns":["encounter_id","readmission_30d","mortality_90d","los_days"]},
+        "Consent":{"pk":"patient_id","fk":[{"patient_id":"Patient.patient_id"}],
+                   "columns":["patient_id","allow_research","allow_risk_scoring","last_updated"]}
+    }
+    
+    st.markdown("#### Conceptual Schema (FHIR-like Mapping)")
+    if HAS_YAML:
+        st.code(yaml.safe_dump(schema, sort_keys=False), language="yaml")
+    else:
+        st.code(json.dumps(schema, indent=2), language="json")
 
+    st.markdown("#### Referential Integrity Checks (Raw Data)")
+    missing_pat = (~encounters["patient_id"].isin(patients["patient_id"])).sum()
+    missing_enc = (~outcomes["encounter_id"].isin(encounters["encounter_id"])).sum()
+    missing_con = (~consent["patient_id"].isin(patients["patient_id"])).sum()
+    colA,colB,colC = st.columns(3)
+    colA.metric("Encounter → Patient missing links", int(missing_pat))
+    colB.metric("Outcome → Encounter missing links", int(missing_enc))
+    colC.metric("Consent → Patient missing links", int(missing_con))
 
-# --- Streamlit App Layout and Content ---
+    st.markdown("#### Sample Raw Tables")
+    st.dataframe(patients.head(10))
+    st.dataframe(encounters.head(10))
+    st.dataframe(outcomes.head(10))
+    st.dataframe(consent.head(10))
 
-st.set_page_config(layout="wide")
+# ===============================================================
+# 3) Secure Access & Audit Trail
+# ===============================================================
+elif page == "Secure Access & Audit Trail":
+    st.subheader("🔒 Secure Data Access & Audit Trail")
+    st.markdown("This section simulates **Role-Based Access Control (RBAC)** and maintains an **Audit Log** for all data access attempts.")
 
-st.title("🏥 AI-Ready Health Data Platform Showcase")
-st.write("This application demonstrates the key features of an AI-Ready Health Data Platform using **synthetic NHS data**.")
-
-
-# --- Sidebar Navigation ---
-page = st.sidebar.radio(
-    "Select a Section",
-    ["Data Overview", "Predictive Models", "Secure Access & Governance"]
-)
-
-
-# --- Data Overview ---
-if page == "Data Overview":
-    st.header("📊 Data Overview")
-    st.write("Explore the synthetic NHS datasets, their FHIR-like transformations, and key demographic distributions.")
-
-    tab1, tab2, tab3 = st.tabs(["Synthetic Datasets", "FHIR-like Datasets", "Demographics & Observations"])
-
-    with tab1:
-        st.subheader("Synthetic NHS Datasets (Source Data)")
-        
-        # Define datasets dictionary for display
-        datasets_display = {
-            "patients.csv": patients,
-            "encounters.csv": encounters,
-            "conditions.csv": conditions,
-            "observations.csv": observations,
-            "medication_requests.csv": meds,
-            "outcomes.csv": outcomes,
-            "consent.csv": consent,
-            "users.csv": users,
-            "audit_log.csv": audit_log
-        }
-        
-        # Display synthetic datasets
-        for name, df in datasets_display.items():
-            st.markdown(f"**{name}** (Rows: {df.shape[0]}, Columns: {df.shape[1]})")
-            st.dataframe(df.head(5))
-
-    with tab2:
-        st.subheader("FHIR-like Transformed Datasets (Data Lake)")
-        
-        fhir_datasets = {
-            "fhir_patients.csv": fhir_patients,
-            "fhir_encounters.csv": fhir_encounters,
-            "fhir_conditions.csv": fhir_conditions,
-            "fhir_observations.csv": fhir_observations,
-            "fhir_medication_requests.csv": fhir_meds
-        }
-        # Display FHIR-like datasets
-        for name, df in fhir_datasets.items():
-            st.markdown(f"**{name}** (FHIR-like Resource) (Rows: {df.shape[0]}, Columns: {df.shape[1]})")
-            st.dataframe(df.head(5))
-
-    with tab3:
-        st.subheader("Demographics & Observations Visualizations")
-        
-        # --- Age Distribution ---
-        fig, ax = plt.subplots(figsize=(10, 4))
-        sns.histplot(patients["age_years"], bins=20, kde=True, ax=ax)
-        ax.set_title("Distribution of Patient Age")
-        ax.set_xlabel("Age (Years)")
-        ax.set_ylabel("Number of Patients")
-        st.pyplot(fig)
-        plt.close(fig)
-
-        col1, col2 = st.columns(2)
-        
-        # --- Sex Distribution ---
-        with col1:
-            fig, ax = plt.subplots(figsize=(5, 5))
-            patients["sex"].value_counts().plot(kind="bar", ax=ax, rot=0)
-            ax.set_title("Distribution of Patient Sex")
-            ax.set_xlabel("Sex")
-            ax.set_ylabel("Number of Patients")
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        # --- Ethnicity Distribution ---
-        with col2:
-            fig, ax = plt.subplots(figsize=(5, 5))
-            patients["ethnicity"].value_counts().plot(kind="bar", ax=ax, rot=45)
-            ax.set_title("Distribution of Patient Ethnicity")
-            ax.set_xlabel("Ethnicity")
-            ax.set_ylabel("Number of Patients")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        # --- BP & BMI Distributions ---
-        st.markdown("---")
-        st.subheader("Clinical Observations")
-        
-        bp_bmi_observations = observations[observations["code"].isin(["BP_SYS", "BP_DIA", "BMI"])].copy()
-        
-        col3, col4, col5 = st.columns(3)
-        
-        with col3:
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.histplot(bp_bmi_observations[bp_bmi_observations["code"] == "BP_SYS"]["value_num"], bins=30, kde=True, ax=ax)
-            ax.set_title("Systolic BP")
-            ax.set_xlabel("BP_SYS (mmHg)")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        with col4:
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.histplot(bp_bmi_observations[bp_bmi_observations["code"] == "BP_DIA"]["value_num"], bins=30, kde=True, ax=ax)
-            ax.set_title("Diastolic BP")
-            ax.set_xlabel("BP_DIA (mmHg)")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        with col5:
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.histplot(bp_bmi_observations[bp_bmi_observations["code"] == "BMI"]["value_num"], bins=30, kde=True, ax=ax)
-            ax.set_title("BMI")
-            ax.set_xlabel("BMI (kg/m2)")
-            st.pyplot(fig)
-            plt.close(fig)
-
-
-# --- Predictive Models ---
-elif page == "Predictive Models":
-    st.header("🤖 Predictive Models & Explainable AI")
-    st.write("Interact with trained machine learning models for clinical risk prediction. Note the consent check for the Chronic Disease model.")
-
-    model_tab1, model_tab2 = st.tabs(["Readmission Risk Model", "Chronic Disease Model (Diabetes)"])
-
-    # Readmission Risk Model
-    with model_tab1:
-        st.subheader("30-Day Readmission Risk Model")
-        
-        # --- Model Prediction Input ---
-        with st.form("readmission_form"):
-            los_days = st.number_input("Length of Stay (days)", min_value=0, value=int(X_readmission['extension.los_days'].median()), key="readmission_los")
-
-            st.markdown("**Encounter & Demographic Features**")
-            col_r1, col_r2 = st.columns(2)
-            
-            with col_r1:
-                encounter_types = encounters["type"].unique().tolist() # Note: The model uses one-hot encoding derived from class.code, but the source data uses "type"
-                selected_encounter_type = st.radio("Encounter Type", encounter_types, key="readmission_etype")
-
-                genders = patients["sex"].unique().tolist()
-                selected_gender_readmission = st.radio("Gender (Patient Sex)", genders, key="readmission_gender")
-            
-            with col_r2:
-                specialties = encounters["admitting_specialty"].unique().tolist()
-                selected_specialty = st.selectbox("Admitting Specialty", specialties, key="readmission_specialty")
-
-                ethnicities = patients["ethnicity"].unique().tolist()
-                selected_ethnicity_readmission = st.selectbox("Ethnicity", ethnicities, key="readmission_ethnicity")
-
-
-            st.markdown("**Condition Features**")
-            selected_conditions = st.multiselect("Select any relevant conditions", common_conditions, key="readmission_conditions")
-            
-            predict_button = st.form_submit_button("Predict Readmission Risk")
-
-        if predict_button:
-            # Create input DataFrame
-            input_data_readmission = pd.DataFrame({'extension.los_days': [los_days]})
-
-            # Handle one-hot encoded categorical features (using class.code columns which map to encounter "type")
-            for etype in ['inpatient', 'outpatient', 'emergency', 'virtual']:
-                input_data_readmission[f'class.code_{etype}'] = 1 if selected_encounter_type == etype else 0
-
-            # Handle specialty encoding
-            for specialty in specialties:
-                 # The model uses 'serviceProvider.display_' prefix from the FHIR-like data
-                 input_data_readmission[f'serviceProvider.display_{specialty}'] = 1 if selected_specialty == specialty else 0
-
-            # Handle gender encoding
-            for gender in genders:
-                 input_data_readmission[f'gender_{gender}'] = 1 if selected_gender_readmission == gender else 0
-
-            # Handle ethnicity encoding
-            for ethnicity in ethnicities:
-                 # The model uses 'extension.ethnicity_' prefix from the FHIR-like data
-                 input_data_readmission[f'extension.ethnicity_{ethnicity}'] = 1 if selected_ethnicity_readmission == ethnicity else 0
-
-            # Handle condition presence features
-            for cond in common_conditions:
-                input_data_readmission[f"has_condition_{cond}"] = 1 if cond in selected_conditions else 0
-
-            # Ensure all columns in X_readmission are present, fill missing with 0
-            for col in X_readmission.columns:
-                if col not in input_data_readmission.columns:
-                    input_data_readmission[col] = 0
-
-            input_data_readmission = input_data_readmission[X_readmission.columns]
-
-            # Make prediction
-            readmission_prediction = model_readmission.predict(input_data_readmission)[0]
-            readmission_probability = model_readmission.predict_proba(input_data_readmission)[:, 1][0]
-
-            # Display prediction
-            st.subheader("Prediction Result:")
-            if readmission_prediction == 1:
-                st.error(f"⚠️ High Risk of Readmission (Probability: {readmission_probability:.2f})")
-            else:
-                st.success(f"✅ Low Risk of Readmission (Probability: {readmission_probability:.2f})")
-            
-            st.markdown("---")
-            
-            # --- Model Performance (Readmission) ---
-            st.subheader("Model Performance Snapshot")
-            
-            # Note: We need to re-calculate the metrics here as they weren't saved
-            y_pred_readmission = model_readmission.predict(X_test_readmission)
-            y_pred_proba_readmission = model_readmission.predict_proba(X_test_readmission)[:, 1]
-            report_readmission = classification_report(y_test_readmission, y_pred_readmission, output_dict=True)
-            auc_score_readmission = roc_auc_score(y_test_readmission, y_pred_proba_readmission)
-
-            metrics_readmission = {
-                "Precision (Class 1)": report_readmission["1"]["precision"],
-                "Recall (Class 1)": report_readmission["1"]["recall"],
-                "F1-score (Class 1)": report_readmission["1"]["f1-score"],
-                "AUC Score": auc_score_readmission
-            }
-            metrics_df_readmission = pd.DataFrame(list(metrics_readmission.items()), columns=["Metric", "Score"])
-
-            fig_perf, ax_perf = plt.subplots(figsize=(8, 4))
-            sns.barplot(x="Metric", y="Score", data=metrics_df_readmission, ax=ax_perf)
-            ax_perf.set_title("Readmission Risk Model Performance")
-            ax_perf.set_ylim(0, 1.0)
-            st.pyplot(fig_perf)
-            plt.close(fig_perf)
-
-    # Chronic Disease Detection Model
-    with model_tab2:
-        st.subheader("Chronic Disease Detection Model (Type 2 Diabetes - E11)")
-        st.warning("Note: This model prediction requires **Patient Consent for Risk Scoring** to be checked for the provided Patient ID.")
-        
-        # --- Model Prediction Input ---
-        with st.form("chronic_form"):
-            col_c1, col_c2 = st.columns(2)
-            with col_c1:
-                age_years = st.number_input("Age (Years)", min_value=0, max_value=100, value=int(chronic_disease_data['extension.age_years'].median()), key="chronic_age")
-                imd_quintile = st.select_slider("IMD Quintile", options=[1, 2, 3, 4, 5], value=int(chronic_disease_data['extension.imd_quintile'].median()), key="chronic_imd")
-                bmi = st.number_input("BMI (kg/m2)", min_value=10.0, max_value=60.0, value=float(chronic_disease_data['BMI'].median()), key="chronic_bmi")
-                bp_sys = st.number_input("Systolic BP (mmHg)", min_value=50.0, max_value=250.0, value=float(chronic_disease_data['BP_SYS'].median()), key="chronic_bpsys")
-                bp_dia = st.number_input("Diastolic BP (mmHg)", min_value=30.0, max_value=150.0, value=float(chronic_disease_data['BP_DIA'].median()), key="chronic_bpdia")
-            
-            with col_c2:
-                chol = st.number_input("Cholesterol (mmol/L)", min_value=1.0, max_value=10.0, value=float(chronic_disease_data['CHOL'].median()), key="chronic_chol")
-                creat = st.number_input("Creatinine (umol/L)", min_value=20.0, max_value=500.0, value=float(chronic_disease_data['CREAT'].median()), key="chronic_creat")
-                hba1c = st.number_input("HbA1c (mmol/mol)", min_value=10.0, max_value=200.0, value=float(chronic_disease_data['HBA1C'].median()), key="chronic_hba1c")
-
-                st.markdown("**History**")
-                has_metformin = st.checkbox("Prescribed Metformin (MET)", key="chronic_metformin")
-                has_insulin = st.checkbox("Prescribed Insulin (INS)", key="chronic_insulin")
-                has_hyperlipidaemia = st.checkbox("Diagnosed Hyperlipidaemia (E78)", key="chronic_hyperlipidaemia")
-                has_hypertension = st.checkbox("Diagnosed Hypertension (I10)", key="chronic_hypertension")
-
-            patient_id_for_prediction = st.text_input("Enter Patient ID (e.g., P0000001) for Consent Check and Prediction", key="patient_id_prediction")
-            
-            col_c3, col_c4 = st.columns(2)
-            with col_c3:
-                predict_chronic_button = st.form_submit_button("Predict Chronic Disease Risk")
-            with col_c4:
-                explain_chronic_button = st.form_submit_button("Explain Last Prediction")
-
-        
-        # --- Prediction Logic ---
-        if predict_chronic_button or explain_chronic_button:
-            
-            if patient_id_for_prediction:
-                patient_info = fhir_patients[fhir_patients["id"] == patient_id_for_prediction]
-                patient_consent = consent[consent["patient_id"] == patient_id_for_prediction]
-                
-                # Default to deny if patient not found or consent not available/denied
-                is_consented = False
-                if not patient_consent.empty and patient_consent["allow_risk_scoring"].iloc[0] == 1:
-                    is_consented = True
-                
-                if is_consented or not predict_chronic_button: # Allow explanation only if prediction was made and consent granted
+    # Convert all loaded CSVs to a dictionary keyed by resource name (no .csv) for the demo
+    data_sources = {
+        "Patient": patients,
+        "Encounter": encounters,
+        "Outcome": outcomes,
+        "Consent": consent,
+        "User": users
+    }
+    
+    # --- Data Access Buttons ---
+    st.markdown("### Data Access Simulation")
+    
+    cols = st.columns(len(data_sources))
+    
+    for i, resource in enumerate(data_sources.keys()):
+        with cols[i]:
+            if st.button(f"Read {resource}", key=f"read_{resource}"):
+                if can_read(role, resource):
+                    st.success(f"Access granted to {resource} (Role: {role}).")
                     
-                    # 1. Create Input DataFrame (use current session state for feature values)
-                    input_data_chronic_base = pd.DataFrame({
-                        'extension.age_years': [age_years],
-                        'extension.imd_quintile': [imd_quintile],
-                        'BMI': [bmi],
-                        'BP_SYS': [bp_sys],
-                        'BP_DIA': [bp_dia],
-                        'CHOL': [chol],
-                        'CREAT': [creat],
-                        'HBA1C': [hba1c],
-                        'has_medication_MET': [1 if has_metformin else 0],
-                        'has_medication_INS': [1 if has_insulin else 0],
-                        'has_related_condition_E78': [1 if has_hyperlipidaemia else 0],
-                        'has_related_condition_I10': [1 if has_hypertension else 0]
-                    })
+                    # Apply simple filtering/anonymization for demo purposes if needed
+                    df_result = data_sources[resource].copy()
                     
-                    # 2. Handle categorical features
-                    gender_cols = [col for col in X_chronic.columns if col.startswith('gender_')]
-                    ethnicity_cols = [col for col in X_chronic.columns if col.startswith('extension.ethnicity_')]
+                    if resource == "Patient" and role == "Analyst":
+                        if 'nhs_number_hash' in df_result.columns:
+                            df_result = df_result.drop(columns=['nhs_number_hash'])
+                        st.caption("Note: NHS Hash dropped for Analyst role (anonymization).")
                     
-                    if not patient_info.empty:
-                        selected_gender_chronic = patient_info["gender"].iloc[0]
-                        selected_ethnicity_chronic = patient_info["extension.ethnicity"].iloc[0]
-                    else:
-                         # Fallback using the selection from the Readmission model section (not ideal, but necessary for demo completeness)
-                        selected_gender_chronic = st.session_state.readmission_gender
-                        selected_ethnicity_chronic = st.session_state.readmission_ethnicity
+                    if resource == "Patient" and role == "Researcher":
+                         # Filter to only consented patients for research
+                        consented_pids = consent[consent['allow_research'] == 1]['patient_id'].tolist()
+                        df_result = df_result[df_result['patient_id'].isin(consented_pids)]
+                        if 'nhs_number_hash' in df_result.columns:
+                            df_result = df_result.drop(columns=['nhs_number_hash'])
+                        st.caption("Note: Filtered by 'allow_research' and NHS Hash dropped for Researcher role.")
 
-                    for col in gender_cols:
-                        gender_value = col.replace('gender_', '')
-                        input_data_chronic_base[col] = 1 if selected_gender_chronic == gender_value else 0
-
-                    for col in ethnicity_cols:
-                        ethnicity_value = col.replace('extension.ethnicity_', '')
-                        input_data_chronic_base[col] = 1 if selected_ethnicity_chronic == ethnicity_value else 0
-
-                    # 3. Finalize Input DataFrame
-                    input_data_chronic = input_data_chronic_base.copy()
-                    for col in X_chronic.columns:
-                        if col not in input_data_chronic.columns:
-                            input_data_chronic[col] = 0
-                    input_data_chronic = input_data_chronic[X_chronic.columns]
-                    
-                    # Store input for explanation
-                    st.session_state['last_chronic_input'] = input_data_chronic.iloc[[0]]
-                    
-                    # 4. Perform Prediction
-                    if predict_chronic_button:
-                        chronic_prediction = model_chronic.predict(input_data_chronic)[0]
-                        chronic_probability = model_chronic.predict_proba(input_data_chronic)[:, 1][0]
-
-                        # Display prediction
-                        st.subheader("Prediction Result:")
-                        if chronic_prediction == 1:
-                            st.error(f"⚠️ High Risk of Type 2 Diabetes (Probability: {chronic_probability:.2f})")
-                        else:
-                            st.success(f"✅ Low Risk of Type 2 Diabetes (Probability: {chronic_probability:.2f})")
-
-
-                
+                    st.dataframe(df_result.head(10), use_container_width=True)
+                    write_audit(user_id, "READ", resource, "ALL", purpose, "success")
                 else:
-                    if predict_chronic_button:
-                        st.warning(f"Prediction withheld for patient ID '{patient_id_for_prediction}' due to lack of consent for risk scoring.")
-            
-            else:
-                 st.warning("Please enter a Patient ID to check consent and make a prediction.")
+                    st.error(f"Access denied to {resource} (Role: {role}).")
+                    write_audit(user_id, "READ", resource, "ALL", purpose, "denied")
 
+    st.markdown("### 📜 Audit Log")
+    
+    # Reload audit log for fresh display
+    if os.path.exists(AUDIT_PATH):
+        audit = pd.read_csv(AUDIT_PATH)
+        st.dataframe(audit.sort_values("timestamp", ascending=False).head(20), use_container_width=True)
         
-        # --- Explanation Logic ---
-        if explain_chronic_button:
-            if 'last_chronic_input' in st.session_state:
-                sample_input_chronic = st.session_state['last_chronic_input']
-                patient_id_for_prediction_exp = patient_id_for_prediction # Use the ID from the form
-                
-                patient_consent = consent[consent["patient_id"] == patient_id_for_prediction_exp]
-                is_consented = False
-                if not patient_consent.empty and patient_consent["allow_risk_scoring"].iloc[0] == 1:
-                    is_consented = True
+        # Audit Log Visualizations
+        if not audit.empty:
+            by_purpose = audit["purpose_of_use"].value_counts().reset_index(name="count")
+            by_result = audit["result"].value_counts().reset_index(name="count")
+            cols2 = st.columns(2)
+            with cols2[0]:
+                st.plotly_chart(px.bar(by_purpose, x="purpose_of_use", y="count", title="Events by Purpose"), use_container_width=True)
+            with cols2[1]:
+                st.plotly_chart(px.pie(by_result, names="result", values="count", title="Access Outcomes"), use_container_width=True)
+        else:
+            st.info("No audit events yet. Use the buttons above to generate some.")
+    else:
+        st.info("Audit log file not found.")
 
-                if is_consented:
-                    st.subheader("Explanation for Chronic Disease Prediction (Explainable AI):")
-                    st.markdown("This **SHAP Force Plot** shows how each feature contributed to the final prediction for the selected patient. Features pushing the prediction higher (towards positive/Diabetes) are red, and those pushing it lower (towards negative/No Diabetes) are blue.")
+# ===============================================================
+# 4) Predictive Analytics (tabs)
+# ===============================================================
+elif page == "Predictive Analytics":
+    st.subheader("🤖 Predictive Analytics")
+    tab_pred, tab_dash, tab_hist = st.tabs(["🧪 Prediction", "📊 Prediction Dashboard", "🕰️ Historical Dashboard"])
+
+    # ---------- Tab 1: Prediction ----------
+    with tab_pred:
+        st.markdown("Choose a model and input features to generate a prediction.")
+        model_choice = st.selectbox("Model", ["Readmission Risk (30d)", "Condition Detection"])
+        
+        if model_choice == "Readmission Risk (30d)":
+            st.markdown("##### Readmission Risk Prediction (Logistic Regression)")
+            with st.form("readm_form"):
+                col_r_p1, col_r_p2 = st.columns(2)
+                with col_r_p1:
+                    age = st.number_input("Age (years)", 18, 100, 60)
+                    etype = st.selectbox("Encounter type", ["inpatient","outpatient","emergency","virtual"], index=0)
+                with col_r_p2:
+                    imd = st.selectbox("IMD Quintile", [1,2,3,4,5], index=2)
+                    los = st.number_input("Length of Stay (days)", 0, 60, 3)
                     
-                    # Create a SHAP explainer for the chronic disease model
-                    explainer_chronic = shap.Explainer(model_chronic, X_chronic.sample(100, random_state=42))
-
-                    # Calculate SHAP values for the sample input
-                    shap_values_chronic = explainer_chronic(sample_input_chronic)
-
-                    # Generate and display the SHAP force plot for the individual prediction
-                    # Use st.components.v1.html to display the plot
-                    html_content = shap.force_plot(explainer_chronic.expected_value, shap_values_chronic.values[0,:], sample_input_chronic.iloc[0,:]).html()
-                    components.html(html_content, width=1000, height=350)
-                
-                else:
-                    st.warning(f"Explanation withheld for patient ID '{patient_id_for_prediction_exp}' due to lack of consent for risk scoring.")
+                submitted = st.form_submit_button("Predict Readmission Risk")
             
-            else:
-                st.warning("Please make a prediction first to generate an explanation.")
+            if submitted:
+                if can_score(role):
+                    # Prepare sample input matching model features
+                    sample = pd.DataFrame([{
+                        "age_years": age, 
+                        "log_los": np.log1p(los),
+                        "is_inpatient": 1 if etype == "inpatient" else 0, 
+                        "is_emergency": 1 if etype == "emergency" else 0,
+                        "sex": "Male", # Default required for OHE in pipeline
+                        "ethnicity": "White", # Default required for OHE in pipeline
+                    }])
+                    
+                    try:
+                        proba = readm_model.predict_proba(sample)[:, 1][0]
+                        st.metric("Predicted 30d Readmission Risk", f"{proba*100:.1f}%")
+                        write_audit(user_id, "SCORE", "model", "readmission", purpose, "success")
+                    except Exception as e:
+                        st.error(f"Prediction failed due to model error. {e}")
+                        write_audit(user_id, "SCORE", "model", "readmission", purpose, "error")
+                else:
+                    st.error("Your role cannot score.")
+                    write_audit(user_id, "SCORE", "model", "readmission", purpose, "denied")
 
+        else: # Condition Detection
+            st.markdown("##### Condition Detection Prediction (Random Forest)")
+            with st.form("cond_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    age = st.number_input("Age (years)", 18, 100, 55, key="cond_age")
+                    sex = st.selectbox("Sex", ["Male","Female"], key="cond_sex")
+                    ethnicity = st.selectbox("Ethnicity", ["White","Black","Asian","Mixed","Other"], key="cond_ethnicity")
+                    bmi = st.number_input("BMI", 10.0, 60.0, 29.0, key="cond_bmi")
+                    smoker = st.selectbox("Smoker", ["Yes","No"], key="cond_smoker")
+                with col2:
+                    ex = st.selectbox("Exercise", ["Low","Moderate","High"], key="cond_ex")
+                    imd = st.selectbox("IMD Quintile", [1,2,3,4,5], index=2, key="cond_imd")
+                    sys = st.number_input("Systolic BP", 80, 220, 138, key="cond_sys")
+                    dia = st.number_input("Diastolic BP", 40, 140, 86, key="cond_dia")
+                    glu = st.number_input("Glucose (mmol/L)", 3.0, 20.0, 6.2, key="cond_glu")
+                    chol = st.number_input("Cholesterol (mmol/L)", 2.0, 12.0, 5.3, key="cond_chol")
+                submitted = st.form_submit_button("Predict Condition")
+            
+            if submitted:
+                if can_score(role):
+                    sample = pd.DataFrame([{
+                        "age_years": age,"sex":sex,"ethnicity":ethnicity,"bmi":bmi,"smoker":smoker,
+                        "exercise_freq": ex,"imd_quintile": imd,"num_conditions": 0,
+                        "systolic_bp": sys,"diastolic_bp": dia,"glucose_mmol": glu,"cholesterol_mmol": chol
+                    }])
+                    
+                    try:
+                        pred = cond_model.predict(sample)[0]
+                        probs = cond_model.predict_proba(sample)[0]
+                        classes = cond_model.named_steps["model"].classes_
+                        st.success(f"Predicted Condition: **{pred}**")
+                        figp = px.bar(x=probs, y=classes, orientation="h",
+                                      title="Condition Probabilities", color=probs, color_continuous_scale="Viridis")
+                        figp.update_layout(xaxis=dict(range=[0,1]))
+                        st.plotly_chart(figp, use_container_width=True)
+                        write_audit(user_id, "SCORE", "model", "condition", purpose, "success")
+                    except Exception as e:
+                        st.error(f"Prediction failed due to model error. {e}")
+                        write_audit(user_id, "SCORE", "model", "condition", purpose, "error")
 
-# --- Secure Access & Governance ---
-elif page == "Secure Access & Governance":
-    st.header("🔒 Secure Access & Governance")
-    st.write("This section demonstrates **Role-Based Access Control (RBAC)** and **Audit Trails** on the FHIR-like data lake.")
+                else:
+                    st.error("Your role cannot score.")
+                    write_audit(user_id, "SCORE", "model", "condition", purpose, "denied")
 
-    governance_tab1, governance_tab2, governance_tab3 = st.tabs(["Secure Data Access", "Consent Simulation", "Audit Trail"])
-
-    # Secure Data Access
-    with governance_tab1:
-        st.subheader("Simulated Secure Data Access (RBAC)")
-
-        roles = users["role"].unique().tolist()
-        selected_role = st.selectbox("Select User Role", roles, key="access_role")
-
-        resource_names = [name.replace(".csv", "") for name in datasets.keys()]
-        selected_resource = st.selectbox("Select Resource to Access", resource_names, key="access_resource")
-
-        user_id_for_role = users[users["role"] == selected_role]["user_id"].iloc[0]
-
-        patient_id_input = None
-        if selected_role in ["Clinician", "Researcher"]:
-            patient_id_input = st.text_input(f"Enter Patient ID (e.g., P0000001) for {selected_role}", key="access_patient_id")
-            if patient_id_input == "":
-                patient_id_input = None
-
-        if st.button("Attempt Data Access"):
-            st.info(f"User: **{user_id_for_role}** (Role: **{selected_role}**) attempting to access **{selected_resource}**.")
-
-            allow_research = None
-            if patient_id_input:
-                 patient_consent_status = consent[consent["patient_id"] == patient_id_input]
-                 if not patient_consent_status.empty:
-                     allow_research = patient_consent_status["allow_research"].iloc[0]
-
-            access_result = retrieve_data(user_id_for_role, selected_resource, patient_id=patient_id_input, purpose_of_use="care", allow_research=allow_research)
-
-            st.subheader("Access Result:")
-            if isinstance(access_result, pd.DataFrame):
-                st.success("Access Granted with Filtering/Anonymization.")
-                st.dataframe(access_result.head(10))
-                st.write(f"Shape: {access_result.shape}")
-                if selected_role == "Analyst" and selected_resource == "patients":
-                    st.caption("Note: As an Analyst, direct identifiers like 'nhs_number_hash' are removed (anonymization).")
-                elif selected_role == "Researcher" and selected_resource == "patients":
-                    st.caption("Note: As a Researcher, access is filtered by 'allow_research' consent and direct identifiers are removed.")
-                elif selected_role == "Clinician" and patient_id_input:
-                    st.caption(f"Note: As a Clinician, data is filtered to records related to Patient ID: {patient_id_input}.")
-            else:
-                st.error(access_result)
-
-
-    # Consent Simulation
-    with governance_tab2:
-        st.subheader("Consent Simulation")
-        st.write("Simulate updating a patient's consent status (data update is temporary in this demo).")
+    # ---------- Tab 2: Prediction Dashboard ----------
+    with tab_dash:
+        st.markdown("Batch score a cohort and explore risk distributions.")
         
-        # Display current list of patients for selection
-        consent_patient_id = st.selectbox("Select Patient ID to Edit Consent", patients["patient_id"].head(20).tolist(), key="consent_pid")
+        model_choice2 = st.selectbox("Cohort model", ["Readmission Risk (30d)", "Condition Detection"], key="cmodel")
+        sample_n = st.slider("Cohort size", 100, 2000, 500, 100)
         
-        # Get current consent status for the selected patient
-        current_consent = consent[consent["patient_id"] == consent_patient_id]
-        if not current_consent.empty:
+        if st.button("Generate Cohort Analysis", key="gen_cohort"):
+            cohort = patients.sample(sample_n, random_state=42).copy()
+            
+            if model_choice2 == "Readmission Risk (30d)":
+                enc_sub = encounters.groupby("patient_id").head(1)[["patient_id","type","los_days"]]
+                df = (cohort[["patient_id","age_years","sex","ethnicity"]]
+                        .merge(enc_sub, on="patient_id", how="left"))
+                df["type"].fillna("outpatient", inplace=True)
+                df["los_days"].fillna(0, inplace=True)
+                
+                df["is_inpatient"] = (df["type"] == "inpatient").astype(int)
+                df["is_emergency"] = (df["type"] == "emergency").astype(int)
+                df["log_los"] = np.log1p(df["los_days"])
+                
+                if can_score(role):
+                    X_input = df[["age_years", "sex", "ethnicity", "is_inpatient", "is_emergency", "log_los"]]
+                    
+                    try:
+                        df["risk"] = readm_model.predict_proba(X_input)[:, 1]
+                        
+                        st.dataframe(df.sort_values("risk", ascending=False).head(20))
+                        st.plotly_chart(px.histogram(df, x="risk", nbins=20, title="Readmission Risk Score Distribution"), use_container_width=True)
+                        write_audit(user_id, "SCORE", "model", "readmission_batch", purpose, "success")
+                    except Exception as e:
+                        st.error(f"Prediction failed due to model error. {e}")
+                        write_audit(user_id, "SCORE", "model", "readmission_batch", purpose, "error")
+
+                else:
+                    st.error("Your role cannot score.")
+                    write_audit(user_id, "SCORE", "model", "readmission_batch", purpose, "denied")
+            
+            else: # Condition Detection
+                X_cols = ["age_years","sex","ethnicity","bmi","smoker","exercise_freq",
+                        "imd_quintile","systolic_bp","diastolic_bp","glucose_mmol","cholesterol_mmol"]
+                X = cohort[X_cols].copy()
+                X["num_conditions"] = 0
+                
+                if can_score(role):
+                    try:
+                        probs = cond_model.predict_proba(X)
+                        classes = cond_model.named_steps["model"].classes_
+                        dfp = pd.DataFrame(probs, columns=classes)
+                        
+                        st.plotly_chart(px.box(dfp, title="Condition Probability Distribution (Cohort)"), use_container_width=True)
+                        write_audit(user_id, "SCORE", "model", "condition_batch", purpose, "success")
+                    except Exception as e:
+                        st.error(f"Prediction failed due to model error. {e}")
+                        write_audit(user_id, "SCORE", "model", "condition_batch", purpose, "error")
+                else:
+                    st.error("Your role cannot score.")
+                    write_audit(user_id, "SCORE", "model", "condition_batch", purpose, "denied")
+
+    # ---------- Tab 3: Historical Dashboard ----------
+    with tab_hist:
+        st.markdown("Model performance snapshots over time (synthetic data only).")
+        months = pd.date_range("2022-01-01", "2025-09-01", freq="MS")
+        aucs = np.clip(np.random.normal(0.78, 0.02, len(months)), 0.7, 0.85)
+        briers = np.clip(np.random.normal(0.095, 0.01, len(months)), 0.07, 0.12)
+        perf = pd.DataFrame({"month": months, "AUC": aucs, "Brier": briers})
+        c1,c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.line(perf, x="month", y="AUC", title="Readmission Model AUC Trend"), use_container_width=True)
+        with c2:
+            st.plotly_chart(px.line(perf, x="month", y="Brier", title="Readmission Model Brier Score Trend"), use_container_width=True)
+
+# ===============================================================
+# 5) Governance: Explainability & Consent
+# ===============================================================
+elif page == "Governance: Explainability & Consent":
+    st.subheader("🧭 Governance — Explainable AI & Consent Simulation")
+
+    exp_tabs = st.tabs(["🔍 Explainability (SHAP)", "📝 Consent Simulation", "📑 Fairness Snapshot"])
+
+    # ---- Explainability
+    with exp_tabs[0]:
+        st.markdown("Global and local explanations for the **Condition Detection (Random Forest)** model.")
+        
+        if can_score(role):
+            pre = cond_model.named_steps["preprocessor"]
+            rf = cond_model.named_steps["model"]
+
+            # Sample data for SHAP computation
+            X = patients.sample(min(200, len(patients)), random_state=7).copy()[["age_years","sex","ethnicity","bmi","smoker","exercise_freq",
+                                                    "imd_quintile","systolic_bp","diastolic_bp","glucose_mmol","cholesterol_mmol"]]
+            X["num_conditions"] = 0
+            
+            # Transform data
+            X_tr = pre.transform(X)
+            if not isinstance(X_tr, np.ndarray):
+                X_tr = X_tr.toarray()
+
+            # Get feature names
+            num_feats = ["age_years","bmi","imd_quintile","systolic_bp","diastolic_bp","glucose_mmol","cholesterol_mmol"]
+            
+            # FIX: Access OneHotEncoder directly
+            ohe = pre.named_transformers_["cat"] 
+            
+            cat_feats = ohe.get_feature_names_out(["sex","ethnicity","smoker","exercise_freq"])
+            all_feats = list(num_feats) + list(cat_feats)
+            
+            X_tr_df = pd.DataFrame(X_tr, columns=all_feats)
+
+            # SHAP computation
+            explainer = shap.TreeExplainer(rf)
+            shap_values = explainer.shap_values(X_tr) # shap_values is a list of arrays (N_classes, N_samples, N_features)
+
+            st.markdown("#### Global Feature Importance (Summary Plot)")
+            # FIX: Pass the full shap_values object (list of arrays) for multi-class summary plot.
+            plt.figure(figsize=(8,5))
+            shap.summary_plot(shap_values, X_tr_df, feature_names=all_feats, show=False) 
+            st.pyplot(plt.gcf()); plt.clf()
+
+            st.markdown("#### Local Explanation (Single Patient's Drivers)")
+            idx = st.slider("Select patient sample index", 0, min(50, len(X)-1), 5)
+            
+            # SHAP values for the selected instance (Class 0 - shape (N_features,))
+            shap_values_for_instance = shap_values[0][idx]
+            # Feature values for the selected instance (Pandas Series - shape (N_features,))
+            features_for_instance = X_tr_df.iloc[idx]
+            
+            st.markdown("##### Force Plot (for prediction at selected index)")
+            # FIX: Use the pre-calculated 1D SHAP values and 1D Series data
+            html_content = shap.force_plot(
+                explainer.expected_value[0], 
+                shap_values_for_instance, 
+                features_for_instance, 
+                matplotlib=False
+            ).html()
+            st.components.v1.html(html_content, height=350)
+            
+            write_audit(user_id, "READ", "model", "SHAP_explainability", purpose, "success")
+        else:
+             st.error("Your role cannot access model scoring/explainability.")
+             write_audit(user_id, "READ", "model", "SHAP_explainability", purpose, "denied")
+
+    # ---- Consent Simulation
+    with exp_tabs[1]:
+        st.markdown("This simulates updating a patient's consent status. This change impacts what data Researchers can access (Read Patients/Encounters/Outcomes) and whether a patient can be scored for Risk.")
+        
+        pid_options = patients["patient_id"].head(50).tolist()
+        pid = st.selectbox("Select Patient ID to Edit Consent", pid_options, key="consent_pid")
+        
+        current_consent = consent[consent["patient_id"] == pid]
+        
+        if len(current_consent) == 0:
+            st.error("Patient not found in consent (Use one from the Patient table list).")
+        else:
             current_consent = current_consent.iloc[0]
 
-            st.markdown(f"**Current Consent Status for {consent_patient_id}:**")
+            st.markdown(f"**Current Consent Status for {pid}:**")
             col_c_curr, col_c_new = st.columns(2)
             with col_c_curr:
                 st.info(f"Allow Research: {'✅ Yes' if current_consent['allow_research'] == 1 else '❌ No'}")
                 st.info(f"Allow Risk Scoring: {'✅ Yes' if current_consent['allow_risk_scoring'] == 1 else '❌ No'}")
             
             st.markdown("---")
-            st.markdown("**Update Consent:**")
+            st.markdown("#### Update Consent (Simulated)")
 
             new_allow_research = st.radio("Allow Research", [1, 0], index=(0 if current_consent['allow_research'] == 1 else 1), format_func=lambda x: "Yes" if x == 1 else "No", key="new_allow_research")
             new_allow_risk_scoring = st.radio("Allow Risk Scoring", [1, 0], index=(0 if current_consent['allow_risk_scoring'] == 1 else 1), format_func=lambda x: "Yes" if x == 1 else "No", key="new_allow_risk_scoring")
             
-            if st.button("Update Consent (Simulated)"):
-                # Simulate the update by modifying the global consent dataframe (will reset on app rerun)
-                consent.loc[consent["patient_id"] == consent_patient_id, "allow_research"] = new_allow_research
-                consent.loc[consent["patient_id"] == consent_patient_id, "allow_risk_scoring"] = new_allow_risk_scoring
+            if st.button("Apply change (Updates data/consent.csv)"):
+                consent.loc[consent["patient_id"] == pid, "allow_research"] = new_allow_research
+                consent.loc[consent["patient_id"] == pid, "allow_risk_scoring"] = new_allow_risk_scoring
                 
-                # Log the action (as an Admin write action for the demo)
-                log_access("U0001", "WRITE", "consent", "governance", "success")
+                consent.to_csv(CONSENT_PATH, index=False)
+                
+                write_audit(user_id, "WRITE", "Consent", pid, purpose, "success")
+                
+                st.success(f"Consent for Patient {pid} updated successfully. Please re-run the app to ensure all cached data loads the new consent.")
 
-                st.success(f"Consent for Patient {consent_patient_id} updated successfully.")
-                st.rerun() # Rerun to update the display
+    # ---- Fairness Snapshot
+    with exp_tabs[2]:
+        st.markdown("#### Fairness Snapshot (Condition Model Prediction Distribution)")
+        st.markdown("This checks the average model prediction confidence across different patient **Ethnicity** groups.")
+        
+        Xfair_cols = ["age_years","sex","ethnicity","bmi","smoker","exercise_freq",
+                      "imd_quintile","systolic_bp","diastolic_bp","glucose_mmol","cholesterol_mmol"]
+        Xfair = patients[Xfair_cols].copy()
+        Xfair["num_conditions"] = 0
+        
+        if can_score(role):
+            try:
+                probs = cond_model.predict_proba(Xfair)
+                pred = cond_model.predict(Xfair)
+                df_f = patients[["ethnicity"]].copy()
+                df_f["pred"] = pred
+                df_f["max_prob"] = probs.max(axis=1) # Max probability as confidence score
+
+                summ = (df_f.groupby("ethnicity")
+                            .agg(Count=("pred","count"),
+                                 Avg_Confidence=("max_prob","mean"),
+                                 Num_Diabetes_Preds=("pred", lambda x: (x == "Diabetes").sum()))
+                            .reset_index())
+                st.dataframe(summ)
+                
+                st.plotly_chart(px.bar(summ, x="ethnicity", y="Avg_Confidence", 
+                                       title="Average Model Confidence by Ethnicity"), use_container_width=True)
+
+                st.plotly_chart(px.bar(summ, x="ethnicity", y="Num_Diabetes_Preds", 
+                                       title="Number of Diabetes Predictions by Ethnicity"), use_container_width=True)
+                
+                write_audit(user_id, "READ", "model", "Fairness_snapshot", purpose, "success")
+            except Exception as e:
+                st.error(f"Could not generate fairness metrics: {e}")
+                write_audit(user_id, "READ", "model", "Fairness_snapshot", purpose, "error")
         else:
-             st.error("Consent record not found for this patient.")
+            st.error("Your role cannot access model scoring/fairness analysis.")
+            write_audit(user_id, "READ", "model", "Fairness_snapshot", purpose, "denied")
 
-
-    # Audit Trail
-    with governance_tab3:
-        st.subheader("Audit Trail Log")
-        st.markdown("All data access attempts (success or denied) are automatically logged for accountability.")
-
-        # Display the audit log
-        if not audit_log.empty:
-            st.dataframe(audit_log.sort_values("timestamp", ascending=False).head(20))
-            
-            col_a1, col_a2 = st.columns(2)
-            
-            with col_a1:
-                fig_purpose, ax_purpose = plt.subplots(figsize=(6, 4))
-                audit_log["purpose_of_use"].value_counts().plot(kind="bar", ax=ax_purpose, rot=45)
-                ax_purpose.set_title("Events by Purpose of Use")
-                st.pyplot(fig_purpose)
-                plt.close(fig_purpose)
-
-            with col_a2:
-                fig_result, ax_result = plt.subplots(figsize=(6, 4))
-                audit_log["result"].value_counts().plot(kind="pie", ax=ax_result, autopct='%1.1f%%', startangle=90)
-                ax_result.set_title("Access Outcomes")
-                ax_result.set_ylabel('')
-                st.pyplot(fig_result)
-                plt.close(fig_result)
-        else:
-            st.info("No audit events logged yet.")
+# ===============================================================
+# Footer
+# ===============================================================
+st.markdown("---")
+st.caption("© AI-Ready Health Data Platform — synthetic, for demonstration only.")

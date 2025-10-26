@@ -1,1 +1,21 @@
 log_id,user_id,action,resource,record_id,timestamp,purpose_of_use,result
+L1761497142667,U0002,SCORE,model,readmission_batch,2025-10-26 16:45:42.667600,care,success
+L1761497330521,U0002,SCORE,model,readmission,2025-10-26 16:48:50.521417,care,success
+L1761497347772,U0002,SCORE,model,readmission_batch,2025-10-26 16:49:07.772364,care,success
+L1761497361308,U0002,SCORE,model,condition_batch,2025-10-26 16:49:21.308809,care,success
+L1761497689129,U0002,READ,Patient,ALL,2025-10-26 16:54:49.130117,care,success
+L1761497691737,U0002,READ,Encounter,ALL,2025-10-26 16:54:51.737337,care,success
+L1761497695994,U0002,READ,Outcome,ALL,2025-10-26 16:54:55.995215,care,success
+L1761497697525,U0002,READ,Consent,ALL,2025-10-26 16:54:57.526019,care,success
+L1761497699012,U0002,READ,User,ALL,2025-10-26 16:54:59.012221,care,denied
+L1761497716342,U0002,SCORE,model,readmission,2025-10-26 16:55:16.342465,care,success
+L1761497725325,U0002,SCORE,model,readmission_batch,2025-10-26 16:55:25.326268,care,success
+L1761497893699,U0002,SCORE,model,readmission,2025-10-26 16:58:13.699793,care,success
+L1761497900144,U0002,SCORE,model,readmission_batch,2025-10-26 16:58:20.144374,care,success
+L1761498118477,U0002,SCORE,model,readmission,2025-10-26 17:01:58.478072,care,success
+L1761498122808,U0002,SCORE,model,readmission_batch,2025-10-26 17:02:02.809108,care,success
+L1761498549062,U0002,SCORE,model,readmission,2025-10-26 17:09:09.065446,care,success
+L1761498570836,U0002,SCORE,model,readmission_batch,2025-10-26 17:09:30.836708,care,success
+L1761498759095,U0002,SCORE,model,readmission,2025-10-26 17:12:39.095456,care,success
+L1761498764841,U0002,SCORE,model,readmission,2025-10-26 17:12:44.841622,care,success
+L1761498769901,U0002,SCORE,model,readmission,2025-10-26 17:12:49.901850,care,success
