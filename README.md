@@ -13,7 +13,7 @@ It showcases:
 - **Predictive analytics** (readmission risk, chronic disease detection)
 - **Explainable AI** dashboards for transparency and trust
 
-> ⚡ *Built end-to-end by [Your Name], to illustrate digital and data leadership capability for transforming care models through AI, data, and innovation.*
+> ⚡ *Built end-to-end by **Oladimeji Kazeem**, to illustrate digital and data leadership capability for transforming care models through AI, data, and innovation.*
 
 ---
 
